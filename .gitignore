@@ -1,0 +1,8 @@
+# Ignore local runtime artifacts and data
+Performace-Intelligence-Agent/data/
+Performace-Intelligence-Agent/.venv/
+
+# Editor / OS junk
+*~
+*.swp
+.DS_Store
