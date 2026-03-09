@@ -12,6 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import seaborn as sns
+from analysis.attendance import _annotate_gaps
 
 BLUE   = '#4a9eed'
 GREEN  = '#22c55e'
@@ -35,6 +36,7 @@ def rx_rate_over_time(df):
     ax.plot(monthly['month_dt'], monthly['rolling'], color=GREEN,
             linewidth=2.5, label='3-month trend')
     ax.axhline(50, color='#ccc', linestyle='--', linewidth=1, label='50% mark')
+    _annotate_gaps(ax, df)
     ax.set_title('RX Rate Over Time', fontsize=16, fontweight='bold', pad=15)
     ax.set_ylabel('% of sessions RX')
     ax.set_ylim(0, 100)

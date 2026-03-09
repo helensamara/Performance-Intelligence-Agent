@@ -32,6 +32,7 @@ def monthly_chart(df):
                 xy=(best_row['month_dt'], best_row['count']),
                 xytext=(0, 8), textcoords='offset points',
                 ha='center', color=GREEN, fontweight='bold')
+    _annotate_gaps(ax, df)
     ax.set_title('Workouts per Month', fontsize=16, fontweight='bold', pad=15)
     ax.set_ylabel('Sessions logged')
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
@@ -61,6 +62,7 @@ def weekly_trend(df):
     ax.plot(weekly['week_dt'], weekly['count'], color=PURPLE, linewidth=1.2)
     ax.plot(weekly['week_dt'], weekly['rolling'], color=AMBER,
             linewidth=2.5, label='4-week rolling avg')
+    _annotate_gaps(ax, df)
     ax.set_title('Sessions per Week', fontsize=16, fontweight='bold', pad=15)
     ax.set_ylabel('Sessions')
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
@@ -95,7 +97,7 @@ def day_of_week(df):
 
 
 def detect_gaps(df, threshold_days=7):
-    """Return list of (gap_start_date, gap_length_days) tuples."""
+    """Return list of {start, days} dicts for gaps longer than threshold_days."""
     unique_days = (df['date'].dt.normalize()
                    .drop_duplicates().sort_values().reset_index(drop=True))
     diffs = unique_days.diff().dt.days
@@ -106,6 +108,23 @@ def detect_gaps(df, threshold_days=7):
             'days':  int(diffs.iloc[idx])
         })
     return gaps
+
+
+def _annotate_gaps(ax, df, threshold_days=30):
+    """Shade significant training gaps on a time-series axes.
+
+    Draws a translucent red span and a small label for every gap longer
+    than threshold_days.  Uses get_xaxis_transform so the label y-position
+    is always at the top of the plot regardless of the data scale.
+    """
+    for gap in detect_gaps(df, threshold_days=threshold_days):
+        gap_start = pd.Timestamp(gap['start'])
+        gap_end   = gap_start + pd.Timedelta(days=gap['days'])
+        ax.axvspan(gap_start, gap_end, alpha=0.08, color=RED, zorder=0)
+        mid = gap_start + pd.Timedelta(days=gap['days'] / 2)
+        ax.text(mid, 0.97, f"{gap['days']}d gap",
+                ha='center', va='top', fontsize=7.5, color=RED, alpha=0.75,
+                transform=ax.get_xaxis_transform())
 
 
 def summary(df):
