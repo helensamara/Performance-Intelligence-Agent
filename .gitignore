@@ -1,6 +1,11 @@
 # Ignore local runtime artifacts and data
 Performace-Intelligence-Agent/data/
 Performace-Intelligence-Agent/.venv/
+Performace-Intelligence-Agent/.env
+
+# Python cache
+**/__pycache__/
+**/*.py[cod]
 
 # Editor / OS junk
 *~

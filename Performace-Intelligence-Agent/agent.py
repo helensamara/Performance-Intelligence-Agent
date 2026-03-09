@@ -4,8 +4,12 @@ Claude agent loop with tool use. Called by app.py on each chat message.
 """
 import os
 import json
+from dotenv import load_dotenv
 import anthropic
 from tools import TOOL_SCHEMAS, run_tool
+
+# Load environment variables from .env (e.g., ANTHROPIC_API_KEY)
+load_dotenv()
 
 client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
 

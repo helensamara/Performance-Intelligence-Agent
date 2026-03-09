@@ -120,11 +120,8 @@ if user_input:
     with st.chat_message('user'):
         st.markdown(user_input)
 
-    # Build clean string-only history for agent
-    history = [
-        m for m in st.session_state['messages']
-        if isinstance(m, dict) and isinstance(m.get('content'), str)
-    ]
+    # Pass full history to agent (includes tool_use/tool_result blocks from prior turns)
+    history = list(st.session_state['messages'])
     history.append({'role': 'user', 'content': user_input})
 
     with st.chat_message('assistant'):
