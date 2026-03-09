@@ -120,16 +120,62 @@ def detect_anomalies(df, contamination=0.08):
 
 # Config per score type: (score_col, group_col, higher_is_better, ylabel, pr_delta)
 _FORECAST_CFG = {
-    'Load':          ('score_load',    'barbell_lift', True,  'lbs',            2.5),
-    'Rounds + Reps': ('best_result_raw', 'title',      True,  'rounds+reps',    0.05),
-    'Reps':          ('score_reps',    'title',        True,  'reps',           1.0),
-    'Time':          ('score_seconds', 'title',        False, 'seconds',        10.0),
+    'Load':          ('score_load',      'barbell_lift', True,  'lbs',         2.5),
+    'Rounds + Reps': ('best_result_raw', 'title',        True,  'rounds+reps', 0.05),
+    'Reps':          ('score_reps',      'title',        True,  'reps',        1.0),
+    'Time':          ('score_seconds',   'title',        False, 'seconds',     10.0),
 }
+
+_BLOCK_HALF_LIFE   = 180   # days — recency decay for weighted regression
+_MIN_STAGNANT      = 6     # sessions without improvement → new block boundary
+_MIN_BLOCK_SESSIONS = 4    # fall back to full history if block is smaller
+
+
+def _detect_block_start(running_best, min_stagnant=_MIN_STAGNANT):
+    """Return (block_start_iloc, is_plateau) for the most recent training block.
+
+    A block boundary is a gap of >= min_stagnant consecutive sessions where the
+    running best did not improve.  is_plateau is True when the tail of the series
+    (last min_stagnant entries) shows no improvement.
+    """
+    rb = np.asarray(running_best, dtype=float)
+    n  = len(rb)
+    if n <= min_stagnant:
+        return 0, False
+
+    # Indices where the running best actually improved
+    improving = np.where(np.diff(rb) > 0)[0] + 1
+
+    # Plateau: no improvement in the last min_stagnant sessions
+    tail_gap   = (n - 1 - improving[-1]) if len(improving) else n
+    is_plateau = len(improving) == 0 or tail_gap >= min_stagnant
+
+    if len(improving) == 0:
+        return 0, is_plateau
+
+    if is_plateau:
+        # Current block = everything from the last improvement onward
+        return int(improving[-1]), True
+
+    # Improving: scan backwards for the gap that opened this block
+    for i in range(len(improving) - 1, 0, -1):
+        if improving[i] - improving[i - 1] >= min_stagnant:
+            return int(improving[i]), False
+
+    return 0, False  # whole history is one improvement block
 
 
 def forecast_prs(df, top_n=6, horizon_days=90, score_type='Load'):
     """
-    Linear regression on running-best curve for the top-N workouts of a score type.
+    Block-aware PR forecasting with recency-weighted regression.
+
+    For each workout, the model:
+      1. Detects the current training block (improvement run or plateau phase).
+      2. Fits a recency-weighted linear regression on that block only,
+         so early history doesn't drag the slope down during active cycles
+         and a plateau naturally produces a near-flat forecast.
+      3. Falls back to full-history recency-weighted fit if the detected block
+         is too small (< _MIN_BLOCK_SESSIONS).
 
     score_type: 'Load' (lbs, higher=better) | 'Rounds + Reps' (decimal, higher=better)
                 'Reps' (count, higher=better) | 'Time' (seconds, lower=better)
@@ -156,19 +202,31 @@ def forecast_prs(df, top_n=6, horizon_days=90, score_type='Load'):
     for i, name in enumerate(top_groups):
         ax   = axes[i]
         data = sessions[sessions[group_col] == name].sort_values('date').copy()
-        data['days'] = (data['date'] - data['date'].min()).dt.days
-        data['running_best'] = data['score'].cummax() if higher_is_better else data['score'].cummin()
+        data['days']         = (data['date'] - data['date'].min()).dt.days
+        data['running_best'] = (data['score'].cummax()
+                                if higher_is_better else data['score'].cummin())
+
+        # ── Block detection ──────────────────────────────────────────
+        block_start, is_plateau = _detect_block_start(data['running_best'].values)
+        block = (data.iloc[block_start:]
+                 if len(data) - block_start >= _MIN_BLOCK_SESSIONS
+                 else data)
+
+        # ── Recency-weighted regression on current block ─────────────
+        last_day  = int(data['days'].max())
+        fit_days  = block['days'].values
+        fit_rb    = block['running_best'].values
+        weights   = np.exp(-np.log(2) * (last_day - fit_days) / _BLOCK_HALF_LIFE)
 
         reg = LinearRegression().fit(
-            data['days'].values.reshape(-1, 1),
-            data['running_best'].values,
+            fit_days.reshape(-1, 1), fit_rb, sample_weight=weights
         )
-        last_day     = data['days'].max()
         future_days  = np.arange(last_day, last_day + horizon_days + 1).reshape(-1, 1)
         future_dates = pd.date_range(data['date'].max(), periods=horizon_days + 1, freq='D')
         y_future     = reg.predict(future_days)
 
-        current_best = data['running_best'].iloc[-1]
+        # ── PR prediction ────────────────────────────────────────────
+        current_best = float(data['running_best'].iloc[-1])
         if higher_is_better:
             next_pr_day = next(
                 (int(fd - last_day) for fd, fv in zip(future_days.flatten(), y_future)
@@ -183,14 +241,23 @@ def forecast_prs(df, top_n=6, horizon_days=90, score_type='Load'):
             )
 
         forecasts[name] = {
-            f'current_best_{ylabel}': round(float(current_best), 2),
+            f'current_best_{ylabel}': round(current_best, 2),
             f'predicted_{horizon_days}d_{ylabel}': round(float(y_future[-1]), 2),
             'days_to_next_pr': next_pr_day,
+            'phase': 'plateau' if is_plateau else 'improving',
         }
+
+        # ── Chart ────────────────────────────────────────────────────
+        forecast_color = RED if is_plateau else AMBER
+        forecast_label = 'Forecast (plateau)' if is_plateau else 'Forecast'
 
         ax.plot(data['date'], data['score'], 'o', color=BLUE, alpha=0.4, markersize=3)
         ax.plot(data['date'], data['running_best'], color=GREEN, linewidth=2, label='Best ever')
-        ax.plot(future_dates, y_future, color=AMBER, linewidth=2, linestyle='--', label='Forecast')
+        ax.plot(future_dates, y_future, color=forecast_color,
+                linewidth=2, linestyle='--', label=forecast_label)
+        if not is_plateau and block_start > 0:
+            ax.axvline(data['date'].iloc[block_start], color='#aaa',
+                       linestyle=':', linewidth=1, label='Block start')
         prs_l = data[data['is_pr']]
         if len(prs_l):
             ax.scatter(prs_l['date'], prs_l['score'], color=AMBER, s=80, zorder=5, marker='*')
