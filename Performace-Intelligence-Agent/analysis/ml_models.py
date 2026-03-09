@@ -87,7 +87,7 @@ def detect_anomalies(df, contamination=0.08):
     Returns (anomalies_df, fig).
     """
     strength = df[(df['score_type'] == 'Load') & (df['barbell_lift'] != '')].copy()
-    strength['load'] = pd.to_numeric(strength['best_result_raw'], errors='coerce')
+    strength['load'] = strength['score_load']
     strength = strength[strength['load'].notna()].sort_values('date').reset_index(drop=True)
     strength['day_num']    = strength['date'].dt.dayofweek
     strength['days_since'] = strength['date'].diff().dt.days.fillna(0)
@@ -118,63 +118,94 @@ def detect_anomalies(df, contamination=0.08):
 
 # ── PR Forecasting ────────────────────────────────────────────────
 
-def forecast_prs(df, top_n=6, horizon_days=90):
+# Config per score type: (score_col, group_col, higher_is_better, ylabel, pr_delta)
+_FORECAST_CFG = {
+    'Load':          ('score_load',    'barbell_lift', True,  'lbs',            2.5),
+    'Rounds + Reps': ('best_result_raw', 'title',      True,  'rounds+reps',    0.05),
+    'Reps':          ('score_reps',    'title',        True,  'reps',           1.0),
+    'Time':          ('score_seconds', 'title',        False, 'seconds',        10.0),
+}
+
+
+def forecast_prs(df, top_n=6, horizon_days=90, score_type='Load'):
     """
-    Linear regression on each lift's running max curve.
+    Linear regression on running-best curve for the top-N workouts of a score type.
+
+    score_type: 'Load' (lbs, higher=better) | 'Rounds + Reps' (decimal, higher=better)
+                'Reps' (count, higher=better) | 'Time' (seconds, lower=better)
+
     Returns (forecasts_dict, fig).
     """
-    strength = df[(df['score_type'] == 'Load') & (df['barbell_lift'] != '')].copy()
-    strength['load'] = pd.to_numeric(strength['best_result_raw'], errors='coerce')
-    top_lifts = strength['barbell_lift'].value_counts().head(top_n).index.tolist()
+    if score_type not in _FORECAST_CFG:
+        raise ValueError(f'score_type must be one of {list(_FORECAST_CFG)}')
+
+    score_col, group_col, higher_is_better, ylabel, pr_delta = _FORECAST_CFG[score_type]
+
+    sessions = df[df['score_type'] == score_type].copy()
+    if score_type == 'Load':
+        sessions = sessions[sessions['barbell_lift'] != '']
+    sessions['score'] = pd.to_numeric(sessions[score_col], errors='coerce')
+    sessions = sessions[sessions['score'].notna()]
+
+    top_groups = sessions[group_col].value_counts().head(top_n).index.tolist()
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 9))
     axes = axes.flatten()
     forecasts = {}
 
-    for i, lift in enumerate(top_lifts):
+    for i, name in enumerate(top_groups):
         ax   = axes[i]
-        data = strength[strength['barbell_lift'] == lift].sort_values('date').copy()
-        data['days']        = (data['date'] - data['date'].min()).dt.days
-        data['running_max'] = data['load'].cummax()
+        data = sessions[sessions[group_col] == name].sort_values('date').copy()
+        data['days'] = (data['date'] - data['date'].min()).dt.days
+        data['running_best'] = data['score'].cummax() if higher_is_better else data['score'].cummin()
 
         reg = LinearRegression().fit(
             data['days'].values.reshape(-1, 1),
-            data['running_max'].values
+            data['running_best'].values,
         )
         last_day     = data['days'].max()
         future_days  = np.arange(last_day, last_day + horizon_days + 1).reshape(-1, 1)
         future_dates = pd.date_range(data['date'].max(), periods=horizon_days + 1, freq='D')
         y_future     = reg.predict(future_days)
 
-        current_max = data['running_max'].max()
-        next_pr_day = next(
-            (int(fd - last_day) for fd, fv in zip(future_days.flatten(), y_future)
-             if fv > current_max + 2.5),
-            None
-        )
-        forecasts[lift] = {
-            'current_max_lbs': current_max,
-            f'predicted_{horizon_days}d_lbs': round(y_future[-1], 1),
+        current_best = data['running_best'].iloc[-1]
+        if higher_is_better:
+            next_pr_day = next(
+                (int(fd - last_day) for fd, fv in zip(future_days.flatten(), y_future)
+                 if fv > current_best + pr_delta),
+                None,
+            )
+        else:
+            next_pr_day = next(
+                (int(fd - last_day) for fd, fv in zip(future_days.flatten(), y_future)
+                 if fv < current_best - pr_delta),
+                None,
+            )
+
+        forecasts[name] = {
+            f'current_best_{ylabel}': round(float(current_best), 2),
+            f'predicted_{horizon_days}d_{ylabel}': round(float(y_future[-1]), 2),
             'days_to_next_pr': next_pr_day,
         }
 
-        # Plot
-        ax.plot(data['date'], data['load'], 'o', color=BLUE, alpha=0.4, markersize=3)
-        ax.plot(data['date'], data['running_max'], color=GREEN, linewidth=2, label='Best ever')
+        ax.plot(data['date'], data['score'], 'o', color=BLUE, alpha=0.4, markersize=3)
+        ax.plot(data['date'], data['running_best'], color=GREEN, linewidth=2, label='Best ever')
         ax.plot(future_dates, y_future, color=AMBER, linewidth=2, linestyle='--', label='Forecast')
         prs_l = data[data['is_pr']]
         if len(prs_l):
-            ax.scatter(prs_l['date'], prs_l['load'], color=AMBER, s=80, zorder=5, marker='*')
-        ax.set_title(lift, fontsize=12, fontweight='bold')
-        ax.set_ylabel('lbs')
+            ax.scatter(prs_l['date'], prs_l['score'], color=AMBER, s=80, zorder=5, marker='*')
+        ax.set_title(str(name)[:25], fontsize=12, fontweight='bold')
+        ax.set_ylabel(ylabel)
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %y'))
         ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha='right')
         ax.legend(fontsize=8)
 
-    for j in range(len(top_lifts), len(axes)):
+    for j in range(len(top_groups), len(axes)):
         axes[j].set_visible(False)
-    plt.suptitle('PR Forecasting — Linear Regression on Lift Curves',
+
+    type_labels = {'Load': 'Lift', 'Rounds + Reps': 'AMRAP', 'Reps': 'Reps', 'Time': 'Timed Workout'}
+    plt.suptitle(f'PR Forecasting — {type_labels.get(score_type, score_type)} Progressions',
                  fontsize=16, fontweight='bold')
     plt.tight_layout()
 

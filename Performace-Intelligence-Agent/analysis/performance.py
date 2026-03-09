@@ -4,6 +4,9 @@ Performance tracking — RX rate, strength progression, lift correlations,
 scaling ratio, PR timeline.
 """
 import re
+import json
+import os
+import anthropic
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -91,20 +94,68 @@ def lift_correlation(df):
     return fig, corr
 
 
+def _extract_weights_claude(notes_list):
+    """Use Claude Haiku to extract the primary working weight (lbs) from each note.
+
+    Handles both explicit ("55 lbs", "95#") and implicit ("used the 95",
+    "went with 65", "dropped to 55") weight references.
+
+    Returns a list of int/float or None, one entry per note.
+    """
+    if not notes_list:
+        return []
+
+    client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
+    results = []
+    batch_size = 100
+
+    for start in range(0, len(notes_list), batch_size):
+        batch = notes_list[start:start + batch_size]
+        notes_text = '\n'.join(f'{i + 1}. {str(n)}' for i, n in enumerate(batch))
+
+        response = client.messages.create(
+            model='claude-haiku-4-5',
+            max_tokens=1024,
+            messages=[{
+                'role': 'user',
+                'content': (
+                    f'Extract the primary working weight (in lbs) from each CrossFit/weightlifting '
+                    f'workout note. Return ONLY a JSON array with exactly {len(batch)} values: '
+                    f'each value is a number (lbs, 5–400) or null if no weight can be determined. '
+                    f'Accept explicit ("55 lbs", "95#") and implicit ("used the 95", "went with 65", '
+                    f'"dropped to 55", "light at 45") references. '
+                    f'If multiple weights appear, return the primary/working weight.\n\n'
+                    f'Notes:\n{notes_text}\n\n'
+                    f'Return only the JSON array, no explanation.'
+                ),
+            }],
+        )
+
+        text = response.content[0].text.strip()
+        match = re.search(r'\[.*?\]', text, re.DOTALL)
+        if match:
+            try:
+                batch_results = json.loads(match.group())
+                if len(batch_results) == len(batch):
+                    results.extend(batch_results)
+                    continue
+            except json.JSONDecodeError:
+                pass
+        results.extend([None] * len(batch))
+
+    return results
+
+
 def scaling_ratio(df):
     """Actual vs prescribed weight ratio over time. Returns (fig, summary_dict)."""
     def _rx_weight(desc):
         m = re.findall(r'(\d+)\s*/\s*(\d+)\s*(?:lbs?|#)?', str(desc))
         return int(m[0][1]) if m else None
 
-    def _actual_weight(notes):
-        m = re.findall(r'(\d+)\s*(?:lbs?|#|lb)\b', str(notes).lower())
-        weights = [int(x) for x in m if 5 <= int(x) <= 400]
-        return weights[0] if weights else None
-
     scaled = df[df['rx_or_scaled'] == 'SCALED'].copy()
     scaled['rx_weight']     = scaled['description'].apply(_rx_weight)
-    scaled['actual_weight'] = scaled['notes'].apply(_actual_weight)
+    weights = _extract_weights_claude(scaled['notes'].tolist())
+    scaled['actual_weight'] = pd.to_numeric(weights, errors='coerce')
     scaled['ratio']         = scaled['actual_weight'] / scaled['rx_weight']
     paired = scaled[scaled['ratio'].notna() & scaled['ratio'].between(0.1, 1.0)].copy()
     paired = paired.sort_values('date').reset_index(drop=True)
