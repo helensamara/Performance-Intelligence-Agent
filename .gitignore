@@ -11,3 +11,8 @@ Performace-Intelligence-Agent/.env
 *~
 *.swp
 .DS_Store
+.~lock.*
+
+# Large media files
+*.webm
+*.mp4
